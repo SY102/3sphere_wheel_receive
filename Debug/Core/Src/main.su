@@ -1,0 +1,13 @@
+../Core/Inc/NRF24.h:355:20:nrf24_set_payload_size	16	static
+../Core/Src/main.c:94:5:main	32	static
+../Core/Src/main.c:183:6:SystemClock_Config	72	static
+../Core/Src/main.c:220:7:NormalizeADC	24	static
+../Core/Src/main.c:228:10:ToPWMus	16	static
+../Core/Src/main.c:235:6:KiwiDrive	56	static
+../Core/Src/main.c:254:6:DebugUART	192	static
+../Core/Src/main.c:268:6:debug_dump_settings	40	static
+../Core/Src/main.c:292:9:Set_PWM_Duty	24	static
+../Core/Src/main.c:314:6:nrf24_receiver_setup	8	static
+../Core/Src/main.c:348:5:__io_putchar	16	static
+../Core/Src/main.c:355:6:try_receive_nrf24	32	static
+../Core/Src/main.c:377:6:Error_Handler	4	static,ignoring_inline_asm

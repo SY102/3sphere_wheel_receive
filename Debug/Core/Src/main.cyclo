@@ -1,0 +1,13 @@
+../Core/Inc/NRF24.h:355:20:nrf24_set_payload_size	1
+../Core/Src/main.c:94:5:main	2
+../Core/Src/main.c:183:6:SystemClock_Config	3
+../Core/Src/main.c:220:7:NormalizeADC	2
+../Core/Src/main.c:228:10:ToPWMus	3
+../Core/Src/main.c:235:6:KiwiDrive	2
+../Core/Src/main.c:254:6:DebugUART	1
+../Core/Src/main.c:268:6:debug_dump_settings	1
+../Core/Src/main.c:292:9:Set_PWM_Duty	4
+../Core/Src/main.c:314:6:nrf24_receiver_setup	1
+../Core/Src/main.c:348:5:__io_putchar	1
+../Core/Src/main.c:355:6:try_receive_nrf24	2
+../Core/Src/main.c:377:6:Error_Handler	1
