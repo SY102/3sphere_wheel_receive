@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "can.h"
 #include "iwdg.h"
 #include "spi.h"
 #include "tim.h"
@@ -52,6 +53,10 @@
 #define ROTATION_CONST -0.5f    // 회전 상수
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
+// VESC Tool에서 설정한 최대 eRPM 값. 안전을 위해 코드에서도 제한을 둡니다.
+#define MAX_ERPM 10000.0f
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -68,33 +73,37 @@ volatile uint8_t nrf_irq_flag = 0;
 volatile uint8_t watchdog_flag = 0;
 
 //system state
-static uint16_t last_rx_ms = 0;
-static uint16_t pwm_active = 0;
+static uint32_t last_rx_ms = 0;
+// --- pwm_active를 motor_active로 의미를 명확히 함 ---
+static uint16_t motor_active = 0;
 
 
 //이부분 봐서 지우던지 하기
 #define PRINT_INTERVAL_MS 50      // 테라텀 줄당 출력 주기(ms)
 volatile uint32_t exti_hits = 0;
 uint32_t last_rawX = 0, last_rawY = 0, last_rawZ = 0;
+static inline void kickdog(void) {
+    HAL_IWDG_Refresh(&hiwdg);
+}
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-
-void nrf24_receiver_setup(void);
-void nrf24_irq_service(void);
-void system_watchdog_service(void);
-void PWM_Start(void);
-void PWM_StopAll(void);
-void KiwiDrive(float vx, float vy, float omega);
-void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
 /* USER CODE BEGIN PFP */
+void CAN_SetERPM(uint8_t vesc_id, int32_t erpm);
+void KiwiDrive_CAN(float vx, float vy, float omega);
+void CAN_StopAll(void);
+void nrf24_receiver_setup(void);
+void system_watchdog_service(void);
+void nrf24_irq_service(void); // <-- 이 줄 추가
+
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+extern IWDG_HandleTypeDef hiwdg;
 
 /* USER CODE END 0 */
 
@@ -132,37 +141,77 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM3_Init();
   MX_IWDG_Init();
+  MX_CAN_Init();
   /* USER CODE BEGIN 2 */
+
+  // --- CAN 설정 및 시작 코드 추가 ---
+  CAN_FilterTypeDef can_filter;
+  can_filter.FilterBank = 0;
+  can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
+  can_filter.FilterScale = CAN_FILTERSCALE_32BIT;
+  can_filter.FilterIdHigh = 0x0000;
+  can_filter.FilterIdLow = 0x0000;
+  can_filter.FilterMaskIdHigh = 0x0000;
+  can_filter.FilterMaskIdLow = 0x0000;
+  can_filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+  can_filter.FilterActivation = ENABLE;
+  if (HAL_CAN_ConfigFilter(&hcan, &can_filter) != HAL_OK) {
+      Error_Handler();
+  }
+  if (HAL_CAN_Start(&hcan) != HAL_OK) {
+      Error_Handler();
+  }
+  if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+      Error_Handler();
+  }
+  // --- CAN 설정 끝 ---
+
+
+
   nrf24_init();
-  nrf24_receiver_setup();
-  HAL_TIM_Base_Start_IT(&htim3);	//TIM3 시작
+
+
+
+
+ nrf24_receiver_setup();
+
+
+
+  HAL_TIM_Base_Start_IT(&htim3);
+  HAL_Delay(10);
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
 
-	  //---데이터 수신 이벤트 처리---
-	 	  if(nrf_irq_flag){
-	 		  nrf_irq_flag = 0;	//flag 내리기
-	 		  nrf24_irq_service();	//데이터 처리 함수 호출, 모터 제어
-	 	  }
-	 	  //---TIM3기반 와치독 이벤트 처리---
-	 	  if(watchdog_flag){
-	 		  watchdog_flag = 0;	//확인 후 flag 내림
-	 		  system_watchdog_service();	//와치독 함수 호출
-	 	  }
+	    // 1. NRF 데이터 수신 처리 (가장 우선순위 높음)
+	    if (nrf_irq_flag) {
+	        nrf_irq_flag = 0;      // 플래그 즉시 내리기
+	        nrf24_irq_service();   // 데이터 처리
+	        kickdog();             // IWDG 리셋
+	    }
 
-	 	  //---저전력 모드 진입(WFI)---
-	 	  if(!nrf_irq_flag && !watchdog_flag){	//두개의 flag가 내려가 있으면 처리할 이벤트가 없으므로 WFI
-	 		  __WFI();
-	 	  }
-	   }
+	    // 2. TIM3 기반 주기적 작업 처리 (10ms 마다)
+	    if (watchdog_flag) {
+	    	;
+
+	        watchdog_flag = 0;     // 플래그 즉시 내리기
+	        system_watchdog_service(); // 통신 타임아웃 검사
+	        // 여기에 나중에 추가할 주기적인 작업들을 넣으세요 (예: 배터리 체크)
+	    }
+
+	    // 3. 처리할 이벤트가 없으면 잠들기
+	    // WFI는 어떤 인터럽트(SysTick, NRF, TIM3 등)가 발생하면 즉시 깨어납니다.
+	    __WFI();
+
+	}
   /* USER CODE END 3 */
 }
 
@@ -211,7 +260,8 @@ void SystemClock_Config(void)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	//nRF24L01 모듈이 데이터를 수신하면 PA4 IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
 
-	if(GPIO_Pin == GPIO_PIN_4){	//이 인터럽트가 PA4핀에서 발생했으면
+	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PA4핀에서 발생했으면
+
 		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
 	}
 }
@@ -222,36 +272,48 @@ static inline float clampf(float x,float a,float b){
 
 float NormalizeADC(int16_t raw){
     int16_t delta = raw - ADC_NEU;
-
-    if(abs(delta) < ADC_DEAD_ZONE){
-        return 0.0f;
-    }
-
-    if(delta > 0) {
-        // CW 방향: 중간값~최대값 → 0~1
-        return (float)delta / (float)(ADC_MAX - ADC_NEU);  // /2010
-    } else {
-        // CCW 방향: 최소값~중간값 → -1~0
-        return (float)delta / (float)(ADC_NEU - ADC_MIN);  // /2010
-    }
-}
-
-uint16_t ToPWMus(float v){
-	if(v > 1.0f){
-		v = 1.0f;
-	}else if(v < -1.0f){
-		v = -1.0f;
-	}
-	return(uint16_t)((v + 1.0f) * 500.0f + 1000.0f);
+    if(abs(delta) < ADC_DEAD_ZONE) return 0.0f;
+    if(delta > 0) return (float)delta / (float)(ADC_MAX - ADC_NEU);
+    else return (float)delta / (float)(ADC_NEU - ADC_MIN);
 }
 
 
-void KiwiDrive(float vx, float vy, float omega){
+// --- KiwiDrive와 주변 함수를 CAN 기반으로 변경 ---
+
+
+void CAN_SetERPM(uint8_t vesc_id, int32_t erpm) {
+    CAN_TxHeaderTypeDef tx_header;
+    uint8_t tx_data[8];
+    uint32_t can_mailbox;
+
+    tx_header.IDE = CAN_ID_EXT;
+    tx_header.ExtId = (0x00000300 | vesc_id); // CAN_PACKET_SET_RPM command
+    tx_header.RTR = CAN_RTR_DATA;
+    tx_header.DLC = 4;
+
+    tx_data[0] = (erpm >> 24) & 0xFF;
+    tx_data[1] = (erpm >> 16) & 0xFF;
+    tx_data[2] = (erpm >> 8) & 0xFF;
+    tx_data[3] = erpm & 0xFF;
+
+
+
+    if (HAL_CAN_AddTxMessage(&hcan, &tx_header, tx_data, &can_mailbox) != HAL_OK) {
+            printf("CAN TX FAILED!\r\n");
+        } else {
+            printf("CAN TX OK! ID:%d, ERPM:%ld\r\n", (int)vesc_id, erpm);
+        }
+
+
+   }
+
+
+void KiwiDrive_CAN(float vx, float vy, float omega) {
     float Rw = -ROTATION_CONST * omega;
 
     float Mtop = vx + Rw;
-    float Mbl = 0.866f*vy - 0.5f*vx + Rw;
-    float Mbr = -0.866f*vy - 0.5f*vx + Rw;
+    float Mbl = 0.866f * vy - 0.5f * vx + Rw;
+    float Mbr = -0.866f * vy - 0.5f * vx + Rw;
 
     float maxM = fmaxf(fabsf(Mtop), fmaxf(fabsf(Mbl), fabsf(Mbr)));
     if (maxM > 1.0f) {
@@ -260,71 +322,16 @@ void KiwiDrive(float vx, float vy, float omega){
         Mbr  /= maxM;
     }
 
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ToPWMus(Mtop)); // PA9
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ToPWMus(Mbl));  // PA10
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, ToPWMus(Mbr));  // PA11
+    int32_t erpm_top = (int32_t)(Mtop * MAX_ERPM);
+    //int32_t erpm_bl = (int32_t)(Mbl * MAX_ERPM);
+    //int32_t erpm_br = (int32_t)(Mbr * MAX_ERPM);
+
+    // VESC ID는 VESC Tool에서 설정한 값과 일치해야 합니다.
+    CAN_SetERPM(1, erpm_top); // Top motor (ID 1)
+    // --- VESC 1개 테스트 시에는 아래 2줄은 주석 처리 ---
+    // CAN_SetERPM(2, erpm_bl);  // Bottom-Left motor (ID 2)
+    // CAN_SetERPM(3, erpm_br);  // Bottom-Right motor (ID 3)
 }
-
-void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ){
-    char buf[128];
-    uint16_t pwm1 = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_2);
-    uint16_t pwm2 = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_3);
-    uint16_t pwm3 = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_4);
-
-    int len = snprintf(buf, sizeof(buf),
-            "rawX:%4lu PWM_top:%4lu | rawY:%4lu PWM_bl:%4lu | rawZ:%4lu PWM_br:%4lu\r\n",
-            (unsigned long)rawX, (unsigned long)pwm1,
-            (unsigned long)rawY, (unsigned long)pwm2,
-            (unsigned long)rawZ, (unsigned long)pwm3);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buf, len, HAL_MAX_DELAY);
-}
-
-void debug_dump_settings(void)                   //주소 확인용
-{
-    uint8_t ch  = nrf24_r_reg(RF_CH,      1);    // RF 채널 번호
-    uint8_t pw  = nrf24_r_reg(RX_PW_P0,   1);    // 파이프0 수신 페이로드 크기
-    uint8_t addr[5];
-
-
-    csn_low();
-    {
-        uint8_t cmd = R_REGISTER | RX_ADDR_P0;
-        HAL_SPI_Transmit(&hspi1, &cmd,     1, 100);
-        HAL_SPI_Receive (&hspi1, addr,     5, 100);
-    }
-    csn_high();
-
-
-    printf("=== NRF24 DEBUG ===\r\n");
-    printf(" RF_CH       = %u\r\n",      ch);
-    printf(" RX_PW_P0    = %u bytes\r\n", pw);
-    printf(" RX_ADDR_P0  = %02X %02X %02X %02X %02X\r\n",
-           addr[0], addr[1], addr[2], addr[3], addr[4]);
-    printf("==================\r\n");
-}
-
-int32_t Set_PWM_Duty(uint32_t adc_value)
-{
-    int32_t us;                                                    // VESC로 보낼 마이크로초 펄스 값
-
-
-    if (abs((int)adc_value - ADC_NEU) < ADC_DEAD_ZONE) {           //데드존 처리
-        us = 1500;
-    } else {
-        us = (int)(((float)adc_value / 4095.0f) * 1000.0f + 1000.0f);
-
-
-        if (us < 1000) us = 1000;                                  //매핑 후 범위 클램핑 (1000~2000 사이로 유지)
-        if (us > 2000) us = 2000;
-    }
-
-                                                                   // TIM1의 채널1 (PA8)의 듀티비 업데이트
-
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)us);
-
-    return us;
-}
-
 
 
 int __io_putchar(int ch)
@@ -334,92 +341,59 @@ int __io_putchar(int ch)
 }
 
 
-bool try_receive_nrf24(uint32_t *rawX, uint32_t *rawY, uint32_t *rawZ)
-{
-    if (!nrf24_data_available()) return false;
-
-    uint8_t buf[6];
-    nrf24_receive(buf, 6);
-
-    *rawX = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
-    *rawY = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-    *rawZ = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
-
-    nrf24_clear_rx_dr();
-    return true;
-}
-
-
 void nrf24_irq_service(void){
+
 	nrf24_stop_listen();
 	uint8_t st = nrf24_r_reg(STATUS, 1);
 
-	if(st & (1<<6)){
+
+	if(st & (1<<6)){ // RX_DR (Data Ready) flag
+
 		uint8_t buf[6];
 		nrf24_receive(buf,6);
 
-		// 6바이트 2진 언패킹(unpacking)
 		uint16_t rawX = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 		uint16_t rawY = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
 		uint16_t rawZ = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
-		DebugUART(rawX, rawY, rawZ);
+		printf("RX ADC -> X:%u, Y:%u, Z:%u\r\n", rawX, rawY, rawZ);
+		motor_active = 1;
 
-		if(!pwm_active){
-			PWM_Start();
-		}
-
-		//읽어온 값을 실제 모터 제어값으로 정규화
-		float vx = NormalizeADC((int16_t)rawX); // 부호 있어야함
+		float vx = NormalizeADC((int16_t)rawX);
 		float vy = NormalizeADC((int16_t)rawY);
 		float omega = NormalizeADC((int16_t)rawZ);
 
-		//변환된 값으로 키위 드라이브 알고리즘을 실행, 모터 구동
-		KiwiDrive(vx, vy, omega);
+		float erpm = sqrt(vx*vx + vy*vy) * MAX_ERPM; //ERPM 값 계산 예시
+		printf("Calculated ERPM: %.2f\r\n", erpm);
+		KiwiDrive_CAN(vx, vy, omega); // CAN 함수 호출로 변경
 
-		//TIM3 워치독을 위해 마지막으로 데이터를 수신한 시간을 현재시간으로 갱신
 		last_rx_ms = HAL_GetTick();
-
-		//nrf24의 RX_DR상태 비터를 0으로 claer, 다음 인터럽트 받을 준비
 		nrf24_clear_rx_dr();
 	}
-
-	nrf24_listen();	//데이터 수신 대기모드
-
+	nrf24_listen();
 }
-
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim){
-	//50ms마다 발생하는 인터럽트(TIM3)
-	if(htim->Instance == TIM3){	//이 인터럽트가 TIM3에서 발생했으면
-		watchdog_flag = 1;	//Main 루프에 점검할 시간이라고 플래그 올림
+	if(htim->Instance == TIM3){
+		watchdog_flag = 1;
 	}
 }
 
-void system_watchdog_service(void){	//워치독 서비스
-	if(pwm_active){
-		//모터가 동작 중일때만 감시 수행
-		if((HAL_GetTick() - last_rx_ms) > RX_TIMEOUT_MS){	//현재시간과 마지막 데이터 수신 시간의 차이가 타임아웃(100ms)를 초과했다면
-			PWM_StopAll();	//모든 모터 정지
+
+void system_watchdog_service(void){
+	if(motor_active){
+		if((HAL_GetTick() - last_rx_ms) > RX_TIMEOUT_MS){
+			CAN_StopAll(); // CAN 정지 함수 호출로 변경
 		}
 	}
 }
 
-void PWM_Start(void){
-	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 
-	pwm_active = 1;	//시스템 상태를 pwm 활성화로 변경하는 플래그
+void CAN_StopAll(void) {
+    CAN_SetERPM(1, 0);
+    // --- VESC 1개 테스트 시에는 아래 2줄은 주석 처리 ---
+    // CAN_SetERPM(2, 0);
+    // CAN_SetERPM(3, 0);
+    motor_active = 0;
 }
-
-//모든 채널의 PWM 완전 정지
-void PWM_StopAll(void){
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
-    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
-
-    pwm_active = 0;
-}
-
 void nrf24_receiver_setup(void)
 {
 
@@ -435,7 +409,7 @@ void nrf24_receiver_setup(void)
                        //무선 채널 40설정
     nrf24_auto_ack_all(disable);
     nrf24_dpl(disable);
-
+    nrf24_data_rate(_1mbps);
     nrf24_set_payload_size(6);
     nrf24_rx_mode();
 
@@ -446,11 +420,18 @@ void nrf24_receiver_setup(void)
 
     nrf24_open_rx_pipe(0, rx_address);
     nrf24_listen();
-    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_4);
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_8);
 }
 
-
-
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *h){
+    CAN_RxHeaderTypeDef rx;
+    uint8_t d[8];
+    if (HAL_CAN_GetRxMessage(h, CAN_RX_FIFO0, &rx, d)==HAL_OK){
+        if (rx.IDE == CAN_ID_EXT){
+        	printf("RX EID=0x%08lX DLC=%ld\r\n", (unsigned long)rx.ExtId, (unsigned long)rx.DLC);
+        }
+    }
+}
 
 /* USER CODE END 4 */
 
