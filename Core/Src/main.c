@@ -200,7 +200,7 @@ int main(void)
 
 	    // 2. TIM3 기반 주기적 작업 처리 (10ms 마다)
 	    if (watchdog_flag) {
-	    	;
+
 
 	        watchdog_flag = 0;     // 플래그 즉시 내리기
 	        system_watchdog_service(); // 통신 타임아웃 검사
