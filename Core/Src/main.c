@@ -44,14 +44,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_MAX 4020    // 실제 최대값
+#define ADC_MAX 4090  // 실제 최대값
 #define ADC_MIN 0
-#define ADC_NEU 2010	//ADC 중간값 4020/2
-#define ADC_DEAD_ZONE 200	//데드존 처리 100
+#define ADC_NEU 2045	//ADC 중간값 4020/2
+#define ADC_DEAD_ZONE 300	//데드존 처리 100
 
-#define ROTATION_CONST -0.5f    // 회전 상수
+#define ROTATION_CONST -0.85f    // 회전 상수
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
+#define MAX_ERPM 5000.0f
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -81,16 +83,14 @@ uint32_t last_rawX = 0, last_rawY = 0, last_rawZ = 0;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-
+/* USER CODE BEGIN PFP */
 void nrf24_receiver_setup(void);
 void nrf24_irq_service(void);
 void system_watchdog_service(void);
-void PWM_Start(void);
 void PWM_StopAll(void);
+void PWM_Start(void);
 void KiwiDrive(float vx, float vy, float omega);
 void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
-/* USER CODE BEGIN PFP */
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -112,6 +112,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -133,8 +134,11 @@ int main(void)
   MX_TIM3_Init();
   MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
+
   nrf24_init();
   nrf24_receiver_setup();
+  debug_dump_settings();
+
   HAL_TIM_Base_Start_IT(&htim3);	//TIM3 시작
   /* USER CODE END 2 */
 
@@ -209,13 +213,14 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
-	//nRF24L01 모듈이 데이터를 수신하면 PA4 IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
-
-	if(GPIO_Pin == GPIO_PIN_4){	//이 인터럽트가 PA4핀에서 발생했으면
+	//nRF24L01 모듈이 데이터를 수신하면 PC IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
+	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PC8핀에서 발생했으면
 		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
+	}else if(GPIO_Pin == GPIO_PIN_6){
+		//비상 정지버튼 E-STOP에서 인터럽트가 발생했다면
+		PWM_StopAll();	//모든 pwm중지
 	}
 }
-
 static inline float clampf(float x,float a,float b){
     return x<a?a:(x>b?b:x);
 }
@@ -247,7 +252,7 @@ uint16_t ToPWMus(float v){
 
 
 void KiwiDrive(float vx, float vy, float omega){
-    float Rw = -ROTATION_CONST * omega;
+    float Rw =ROTATION_CONST * omega;
 
     float Mtop = vx + Rw;
     float Mbl = 0.866f*vy - 0.5f*vx + Rw;
@@ -349,6 +354,19 @@ bool try_receive_nrf24(uint32_t *rawX, uint32_t *rawY, uint32_t *rawZ)
     return true;
 }
 
+uint16_t SpeedToPWMus(float speed_fraction) {
+    // speed_fraction은 -1.0 ~ 1.0 범위의 값
+    float target_erpm = speed_fraction * MAX_ERPM; // 목표 ERPM 계산
+
+    // 목표 ERPM을 1000us ~ 2000us 범위의 PWM 펄스 폭으로 변환
+    float pulse_width = 1500.0f + (target_erpm / MAX_ERPM) * 500.0f;
+
+    // 안전장치
+    if (pulse_width > 2000.0f) pulse_width = 2000.0f;
+    if (pulse_width < 1000.0f) pulse_width = 1000.0f;
+
+    return (uint16_t)pulse_width;
+}
 
 void nrf24_irq_service(void){
 	nrf24_stop_listen();
@@ -403,7 +421,13 @@ void system_watchdog_service(void){	//워치독 서비스
 	}
 }
 
-void PWM_Start(void){
+void PWM_StartNeutral(void){
+	//초기 PWM 중립 세팅
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1500);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1500);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
+
+    //PWM 시작
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
@@ -419,6 +443,16 @@ void PWM_StopAll(void){
 
     pwm_active = 0;
 }
+
+void PWM_Start(void){
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+	pwm_active = 1;	//시스템 상태를 pwm 활성화로 변경하는 플래그
+}
+
+
 
 void nrf24_receiver_setup(void)
 {
@@ -446,7 +480,7 @@ void nrf24_receiver_setup(void)
 
     nrf24_open_rx_pipe(0, rx_address);
     nrf24_listen();
-    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_4);
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_8);
 }
 
 
