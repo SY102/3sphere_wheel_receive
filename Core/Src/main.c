@@ -305,7 +305,7 @@ void CAN_SetERPM(uint8_t vesc_id, int32_t erpm) {
         }
 
 
-
+}
 
 
 void KiwiDrive_CAN(float vx, float vy, float omega) {
