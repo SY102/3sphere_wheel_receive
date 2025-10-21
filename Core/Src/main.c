@@ -45,16 +45,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_MAX 4020    // 실제 최대값
+#define ADC_MAX 4090    // 실제 최대값
 #define ADC_MIN 0
-#define ADC_NEU 2010	//ADC 중간값 4020/2
+#define ADC_NEU 2040	//ADC 중간값 4020/2
 #define ADC_DEAD_ZONE 200	//데드존 처리 100
 
 #define ROTATION_CONST -0.5f    // 회전 상수
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
 // VESC Tool에서 설정한 최대 eRPM 값. 안전을 위해 코드에서도 제한을 둡니다.
-#define MAX_ERPM 10000.0f
+#define MAX_ERPM 5000.0f
 
 
 /* USER CODE END PD */
@@ -305,7 +305,7 @@ void CAN_SetERPM(uint8_t vesc_id, int32_t erpm) {
         }
 
 
-   }
+
 
 
 void KiwiDrive_CAN(float vx, float vy, float omega) {
