@@ -137,7 +137,7 @@ int main(void)
 
   nrf24_init();
   nrf24_receiver_setup();
-  debug_dump_settings();
+
 
   HAL_TIM_Base_Start_IT(&htim3);	//TIM3 시작
   /* USER CODE END 2 */
