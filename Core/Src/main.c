@@ -53,7 +53,7 @@
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
 #define MAX_ERPM 5000.0f
-
+volatile uint8_t g_estop_latch = 0;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -112,7 +112,6 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -150,6 +149,12 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  HAL_IWDG_Refresh(&hiwdg);
+
+	   if (g_estop_latch) {
+	        // E-Stop 상태: 아무 입력도 처리하지 않음
+	        continue;
+	    }
 
 	  //---데이터 수신 이벤트 처리---
 	 	  if(nrf_irq_flag){
@@ -214,11 +219,17 @@ void SystemClock_Config(void)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	//nRF24L01 모듈이 데이터를 수신하면 PC IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
-	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PC8핀에서 발생했으면
-		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
-	}else if(GPIO_Pin == GPIO_PIN_6){
-		//비상 정지버튼 E-STOP에서 인터럽트가 발생했다면
-		PWM_StopAll();	//모든 pwm중지
+	if(GPIO_Pin == GPIO_PIN_8){	// nRF IRQ (PC8)
+			// ★수정★: 비상정지 상태(1)가 아닐 때만 nRF 수신 플래그를 올림
+		if (g_estop_latch == 0) {
+					nrf_irq_flag = 1;
+			}
+
+		}else if(GPIO_Pin == GPIO_PIN_6){ // E-Stop 스위치 (PC6)
+			// ★수정★: 비상정지 스위치가 눌리면
+			g_estop_latch = 1;
+			PWM_StopAll();	      // 즉시 모든 모터 정지
+
 	}
 }
 static inline float clampf(float x,float a,float b){
@@ -380,9 +391,9 @@ void nrf24_irq_service(void){
 		uint16_t rawX = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
 		uint16_t rawY = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
 		uint16_t rawZ = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
-		DebugUART(rawX, rawY, rawZ);
 
-		if(!pwm_active){
+
+		if(!pwm_active&& g_estop_latch == 0){
 			PWM_Start();
 		}
 
@@ -393,7 +404,7 @@ void nrf24_irq_service(void){
 
 		//변환된 값으로 키위 드라이브 알고리즘을 실행, 모터 구동
 		KiwiDrive(vx, vy, omega);
-
+		DebugUART(rawX, rawY, rawZ);
 		//TIM3 워치독을 위해 마지막으로 데이터를 수신한 시간을 현재시간으로 갱신
 		last_rx_ms = HAL_GetTick();
 
@@ -437,11 +448,15 @@ void PWM_StartNeutral(void){
 
 //모든 채널의 PWM 완전 정지
 void PWM_StopAll(void){
+
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
     HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
-
+    __HAL_TIM_DISABLE(&htim1);
     pwm_active = 0;
+    HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);            // nRF IRQ 완전 차단
+       HAL_GPIO_WritePin(CE_Pin_GPIO_Port, CE_Pin_Pin, GPIO_PIN_RESET);
+
 }
 
 void PWM_Start(void){
