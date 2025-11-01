@@ -323,14 +323,14 @@ void KiwiDrive_CAN(float vx, float vy, float omega) {
     }
 
     int32_t erpm_top = (int32_t)(Mtop * MAX_ERPM);
-    //int32_t erpm_bl = (int32_t)(Mbl * MAX_ERPM);
-    //int32_t erpm_br = (int32_t)(Mbr * MAX_ERPM);
+    int32_t erpm_bl = (int32_t)(Mbl * MAX_ERPM);
+    int32_t erpm_br = (int32_t)(Mbr * MAX_ERPM);
 
     // VESC ID는 VESC Tool에서 설정한 값과 일치해야 합니다.
     CAN_SetERPM(1, erpm_top); // Top motor (ID 1)
     // --- VESC 1개 테스트 시에는 아래 2줄은 주석 처리 ---
-    // CAN_SetERPM(2, erpm_bl);  // Bottom-Left motor (ID 2)
-    // CAN_SetERPM(3, erpm_br);  // Bottom-Right motor (ID 3)
+     CAN_SetERPM(2, erpm_bl);  // Bottom-Left motor (ID 2)
+     CAN_SetERPM(3, erpm_br);  // Bottom-Right motor (ID 3)
 }
 
 
@@ -390,8 +390,8 @@ void system_watchdog_service(void){
 void CAN_StopAll(void) {
     CAN_SetERPM(1, 0);
     // --- VESC 1개 테스트 시에는 아래 2줄은 주석 처리 ---
-    // CAN_SetERPM(2, 0);
-    // CAN_SetERPM(3, 0);
+     CAN_SetERPM(2, 0);
+     CAN_SetERPM(3, 0);
     motor_active = 0;
 }
 void nrf24_receiver_setup(void)
